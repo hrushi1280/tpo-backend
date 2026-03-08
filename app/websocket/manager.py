@@ -61,6 +61,28 @@ class ConnectionManager:
         for student_id in stale_students:
             self.student_connections.pop(student_id, None)
 
+
+    async def broadcast_event(self, payload: dict[str, Any]) -> None:
+        stale_students: list[str] = []
+        for student_id, ws in self.student_connections.items():
+            try:
+                await ws.send_json(payload)
+            except Exception:
+                stale_students.append(student_id)
+
+        for student_id in stale_students:
+            self.student_connections.pop(student_id, None)
+
+        stale_admins: list[str] = []
+        for admin_id, ws in self.admin_connections.items():
+            try:
+                await ws.send_json(payload)
+            except Exception:
+                stale_admins.append(admin_id)
+
+        for admin_id in stale_admins:
+            self.admin_connections.pop(admin_id, None)
+
     async def send_to_admin(self, message_data: dict[str, Any], target_admin_id: str | None = None) -> None:
         payload = {
             'type': message_data.get('type', 'message'),

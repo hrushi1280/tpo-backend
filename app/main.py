@@ -62,8 +62,12 @@ class RegisterStudentRequest(BaseModel):
     email: str
     phone: str
     branch: str
+    division: str
     batch_year: int
     graduation_year: int
+    current_cgpa: float
+    tenth_percentage: float
+    twelfth_percentage: float
 
 
 class SessionRequest(BaseModel):
@@ -183,6 +187,33 @@ def login_student(payload: LoginRequest) -> dict[str, Any]:
 
 @app.post('/auth/register/student')
 def register_student(payload: RegisterStudentRequest) -> dict[str, Any]:
+    allowed_branches = {'COMPUTER', 'IT', 'AIDS', 'ENTC', 'ELECTRICAL', 'INSTRUMENTATION'}
+    dual_division_branches = {'COMPUTER', 'IT', 'AIDS', 'ENTC'}
+
+    branch = payload.branch.strip().upper()
+    division = payload.division.strip().upper()
+
+    if payload.graduation_year < 2027:
+        return {'success': False, 'message': 'Only passout year 2027 and above is allowed.'}
+
+    if branch not in allowed_branches:
+        return {'success': False, 'message': 'Invalid branch selected.'}
+
+    if division not in {'A', 'B'}:
+        return {'success': False, 'message': 'Division must be A or B.'}
+
+    if branch not in dual_division_branches and division != 'A':
+        return {'success': False, 'message': 'Selected branch supports only division A.'}
+
+    if payload.current_cgpa < 0 or payload.current_cgpa > 10:
+        return {'success': False, 'message': 'CGPA must be between 0 and 10.'}
+
+    if payload.tenth_percentage < 0 or payload.tenth_percentage > 100:
+        return {'success': False, 'message': '10th percentage must be between 0 and 100.'}
+
+    if payload.twelfth_percentage < 0 or payload.twelfth_percentage > 100:
+        return {'success': False, 'message': '12th percentage must be between 0 and 100.'}
+
     prn = payload.prn.strip().upper()
     exists = supabase.table('students').select('id').eq('prn', prn).limit(1).execute()
     if _single_or_none(exists.data):
@@ -194,13 +225,16 @@ def register_student(payload: RegisterStudentRequest) -> dict[str, Any]:
         'full_name': payload.full_name.strip(),
         'email': payload.email.strip().lower(),
         'phone': payload.phone.strip(),
-        'branch': payload.branch,
+        'branch': branch,
+        'division': division,
         'batch_year': payload.batch_year,
         'graduation_year': payload.graduation_year,
         'is_approved': False,
         'is_blocked': False,
         'placement_status': 'NOT_PLACED',
-        'current_cgpa': 0,
+        'current_cgpa': payload.current_cgpa,
+        'tenth_percentage': payload.tenth_percentage,
+        'twelfth_percentage': payload.twelfth_percentage,
         'backlogs': 0,
     }
 
@@ -258,8 +292,65 @@ def pending_students() -> dict[str, Any]:
 
 @app.patch('/students/{student_id}')
 def update_student(student_id: str, payload: UpdatePayload) -> dict[str, bool]:
+    before_res = supabase.table('students').select('*').eq('id', student_id).limit(1).execute()
+    before_row = _single_or_none(before_res.data) or {}
+
     supabase.table('students').update(payload.data).eq('id', student_id).execute()
+
+    tracked_fields = [
+        'current_cgpa',
+        'backlogs',
+        'tenth_percentage',
+        'twelfth_percentage',
+        'phone',
+        'email',
+        'division',
+        'first_name',
+        'middle_name',
+        'last_name',
+        'mother_name',
+        'date_of_birth',
+        'is_handicapped',
+        'handicap_details',
+    ]
+
+    history_rows: list[dict[str, Any]] = []
+    for field in tracked_fields:
+        if field not in payload.data:
+            continue
+        old_val = before_row.get(field)
+        new_val = payload.data.get(field)
+        if str(old_val) != str(new_val):
+            history_rows.append({
+                'student_id': student_id,
+                'field_name': field,
+                'old_value': None if old_val is None else str(old_val),
+                'new_value': None if new_val is None else str(new_val),
+                'changed_by': student_id,
+            })
+
+    if history_rows:
+        try:
+            supabase.table('student_profile_audit').insert(history_rows).execute()
+        except Exception as exc:
+            # Keep profile update successful even if audit table is not ready.
+            print(f'Failed to write student profile audit: {exc}')
+
     return {'success': True}
+
+
+@app.get('/students/{student_id}/profile-history')
+def get_student_profile_history(student_id: str, limit: int = 25) -> dict[str, Any]:
+    safe_limit = max(1, min(limit, 100))
+    result = (
+        supabase.table('student_profile_audit')
+        .select('*')
+        .eq('student_id', student_id)
+        .order('changed_at', desc=True)
+        .limit(safe_limit)
+        .execute()
+    )
+    return {'data': result.data or []}
 
 
 @app.patch('/students/auto-unblock')
@@ -435,14 +526,40 @@ def upload_file(
     folder: str = Form(...),
     prefix: str = Form('file')
 ) -> dict[str, Any]:
+    safe_bucket = (bucket or '').strip()
+    safe_folder = (folder or '').strip().strip('/')
+    if not safe_bucket or not safe_folder:
+        raise HTTPException(status_code=400, detail='bucket and folder are required')
+
     ext = (file.filename or 'bin').split('.')[-1]
     filename = f"{prefix}_{uuid4().hex}.{ext}"
-    path = f"{folder.strip('/')}/{filename}"
+    path = f"{safe_folder}/{filename}"
 
     content = file.file.read()
-    supabase.storage.from_(bucket).upload(path, content)
-    public_url = supabase.storage.from_(bucket).get_public_url(path)
-    return {'success': True, 'publicUrl': public_url, 'path': path}
+    if not content:
+        raise HTTPException(status_code=400, detail='Uploaded file is empty')
+
+    try:
+        # Ensure bucket exists for notice attachments (safe no-op if it already exists).
+        if safe_bucket == 'notice-attachments':
+            try:
+                supabase.storage.get_bucket(safe_bucket)
+            except Exception:
+                try:
+                    supabase.storage.create_bucket(safe_bucket, {'public': True})
+                except Exception:
+                    pass
+
+        content_type = file.content_type or 'application/octet-stream'
+        supabase.storage.from_(safe_bucket).upload(
+            path,
+            content,
+            {'content-type': content_type},
+        )
+        public_url = supabase.storage.from_(safe_bucket).get_public_url(path)
+        return {'success': True, 'publicUrl': public_url, 'path': path}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f'Upload failed: {exc}') from exc
 
 
 
@@ -455,25 +572,7 @@ async def websocket_endpoint(websocket: WebSocket, user_id: str, role: str):
             message_data = await receive_json(websocket)
             msg_type = message_data.get('type')
 
-            if msg_type == 'notice' and role == 'admin':
-                notice_insert = supabase.table('notices').insert({
-                    'title': message_data.get('title', ''),
-                    'content': message_data.get('content', ''),
-                    'priority': message_data.get('priority', 'NORMAL'),
-                    'created_by': user_id,
-                    'is_pinned': bool(message_data.get('is_pinned', False)),
-                }).execute()
-
-                notice_row = _single_or_none(notice_insert.data) or {}
-                await manager.broadcast_notice({
-                    'id': notice_row.get('id'),
-                    'title': notice_row.get('title', message_data.get('title', '')),
-                    'content': notice_row.get('content', message_data.get('content', '')),
-                    'priority': notice_row.get('priority', message_data.get('priority', 'NORMAL')),
-                    'is_pinned': notice_row.get('is_pinned', bool(message_data.get('is_pinned', False))),
-                })
-
-            elif msg_type == 'message':
+            if msg_type == 'message':
                 if role == 'student':
                     admin_res = supabase.table('admin_users').select('id').eq('is_active', True).limit(1).execute()
                     target_admin_id = (admin_res.data or [{}])[0].get('id')

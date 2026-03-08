@@ -3,10 +3,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from ..db import supabase
+from ..websocket.manager import manager
 
 router = APIRouter()
 
@@ -14,6 +15,35 @@ router = APIRouter()
 class NoticeReadPayload(BaseModel):
     student_id: str | None = None
     user_id: str | None = None
+
+
+class NoticeCreatePayload(BaseModel):
+    title: str
+    content: str
+    priority: str = 'NORMAL'
+    created_by: str | None = None
+    is_pinned: bool = False
+    expires_at: str | None = None
+    attachment_url: str | None = None
+    attachment_name: str | None = None
+    target_branches: list[str] | None = None
+    target_batches: list[int] | None = None
+    target_programs: list[str] | None = None
+    is_active: bool = True
+
+
+class NoticeUpdatePayload(BaseModel):
+    title: str | None = None
+    content: str | None = None
+    priority: str | None = None
+    is_pinned: bool | None = None
+    expires_at: str | None = None
+    attachment_url: str | None = None
+    attachment_name: str | None = None
+    target_branches: list[str] | None = None
+    target_batches: list[int] | None = None
+    target_programs: list[str] | None = None
+    is_active: bool | None = None
 
 
 def _now_iso() -> str:
@@ -26,6 +56,13 @@ def _single_or_none(data: Any) -> dict[str, Any] | None:
     if isinstance(data, dict):
         return data
     return None
+
+
+def _normalize_priority(value: str | None) -> str:
+    priority = (value or 'NORMAL').strip().upper()
+    if priority not in {'LOW', 'NORMAL', 'HIGH'}:
+        return 'NORMAL'
+    return priority
 
 
 @router.get('')
@@ -44,7 +81,13 @@ def list_notices(student_id: str | None = None, is_admin: bool = False) -> list[
 
     student = None
     if student_id:
-        student_res = supabase.table('students').select('id,branch,batch_year').eq('id', student_id).limit(1).execute()
+        student_res = (
+            supabase.table('students')
+            .select('id,branch,batch_year')
+            .eq('id', student_id)
+            .limit(1)
+            .execute()
+        )
         student = _single_or_none(student_res.data)
 
     filtered: list[dict[str, Any]] = []
@@ -81,6 +124,65 @@ def list_notices(student_id: str | None = None, is_admin: bool = False) -> list[
         filtered.append(notice_row)
 
     return filtered
+
+
+@router.post('')
+async def create_notice(payload: NoticeCreatePayload) -> dict[str, Any]:
+    if not payload.title.strip() or not payload.content.strip():
+        raise HTTPException(status_code=400, detail='Title and content are required')
+
+    insert_row = {
+        'title': payload.title.strip(),
+        'content': payload.content.strip(),
+        'priority': _normalize_priority(payload.priority),
+        'created_by': payload.created_by,
+        'is_pinned': bool(payload.is_pinned),
+        'expires_at': payload.expires_at,
+        'attachment_url': payload.attachment_url,
+        'attachment_name': payload.attachment_name,
+        'target_branches': payload.target_branches,
+        'target_batches': payload.target_batches,
+        'target_programs': payload.target_programs,
+        'is_active': bool(payload.is_active),
+    }
+
+    result = supabase.table('notices').insert(insert_row).execute()
+    notice = _single_or_none(result.data)
+    if not notice:
+        raise HTTPException(status_code=500, detail='Failed to create notice')
+
+    await manager.broadcast_event({'type': 'notice_created', 'notice': notice})
+    return notice
+
+
+@router.patch('/{notice_id}')
+async def update_notice(notice_id: str, payload: NoticeUpdatePayload) -> dict[str, Any]:
+    patch_data = {k: v for k, v in payload.model_dump().items() if v is not None}
+    if 'priority' in patch_data:
+        patch_data['priority'] = _normalize_priority(str(patch_data['priority']))
+
+    if not patch_data:
+        raise HTTPException(status_code=400, detail='No fields to update')
+
+    result = supabase.table('notices').update(patch_data).eq('id', notice_id).execute()
+    notice = _single_or_none(result.data)
+    if not notice:
+        raise HTTPException(status_code=404, detail='Notice not found')
+
+    await manager.broadcast_event({'type': 'notice_updated', 'notice': notice})
+    return notice
+
+
+@router.delete('/{notice_id}')
+async def delete_notice(notice_id: str) -> dict[str, bool]:
+    exists = supabase.table('notices').select('id').eq('id', notice_id).limit(1).execute()
+    row = _single_or_none(exists.data)
+    if not row:
+        raise HTTPException(status_code=404, detail='Notice not found')
+
+    supabase.table('notices').delete().eq('id', notice_id).execute()
+    await manager.broadcast_event({'type': 'notice_deleted', 'notice_id': notice_id})
+    return {'success': True}
 
 
 @router.post('/{notice_id}/read')
