@@ -10,7 +10,7 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Form, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from .config import CORS_ORIGINS
+from .config import CORS_ORIGINS, CORS_ORIGIN_REGEX
 from .offcampus import router as offcampus_router
 from .routes import notices, messages
 from .websocket.manager import manager
@@ -25,6 +25,7 @@ app.include_router(messages.router, prefix='/messages', tags=['messages'])
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
+    allow_origin_regex=CORS_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=['*'],
     allow_headers=['*'],
@@ -96,8 +97,20 @@ class ApplicationSubmitPayload(BaseModel):
     answers: dict[str, str] | None = None
 
 
+@app.get('/')
+def root() -> dict[str, str]:
+    return {'service': 'tpo-backend', 'status': 'ok'}
+
 @app.get('/health')
 def health() -> dict[str, str]:
+    return {'status': 'ok'}
+
+@app.get('/health/live')
+def health_live() -> dict[str, str]:
+    return {'status': 'ok'}
+
+@app.get('/health/ready')
+def health_ready() -> dict[str, str]:
     return {'status': 'ok'}
 
 

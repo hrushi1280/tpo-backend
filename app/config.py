@@ -8,6 +8,7 @@ SUPABASE_SERVICE_ROLE_KEY = os.getenv('SUPABASE_SERVICE_ROLE_KEY', '')
 BACKEND_HOST = os.getenv('BACKEND_HOST', '0.0.0.0')
 BACKEND_PORT = int(os.getenv('BACKEND_PORT', '8000'))
 CORS_ORIGINS = [origin.strip() for origin in os.getenv('CORS_ORIGINS', 'http://localhost:5173').split(',') if origin.strip()]
+CORS_ORIGIN_REGEX = os.getenv('CORS_ORIGIN_REGEX', r'https://.*\.vercel\.app')
 
 ADZUNA_APP_ID = os.getenv('ADZUNA_APP_ID', '')
 ADZUNA_APP_KEY = os.getenv('ADZUNA_APP_KEY', '')
