@@ -1,1 +1,6 @@
-python-3.10.13
+fastapi
+uvicorn
+gunicorn
+python-dotenv
+requests
+supabase
